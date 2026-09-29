@@ -1,0 +1,209 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dash for Cash</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#05070b;font-family:Arial,sans-serif;color:white}
+canvas{display:block;width:100vw;height:100vh}
+#hint{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#000b;padding:8px 14px;border-radius:10px;font-size:14px}
+#shop{position:fixed;right:18px;top:18px;background:#07101cdd;border:1px solid #ffffff33;border-radius:14px;padding:12px;display:none;width:190px}
+#shop h3{margin:0 0 8px}.item{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:7px 0;font-size:13px}
+button{border:0;border-radius:8px;padding:7px 10px;background:#ffd43b;font-weight:bold;cursor:pointer}
+#touch{position:fixed;bottom:25px;left:20px;right:20px;display:flex;justify-content:space-between;pointer-events:none}
+.tbtn{pointer-events:auto;width:76px;height:55px;border-radius:15px;background:#ffffff22;border:1px solid #fff5;color:#fff;font-size:25px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="shop">
+<h3>🏆 Prize Shop</h3>
+<div id="cashShop"></div>
+</div>
+<div id="hint">A/D or ←/→ to steer • SPACE = purchased Boost • S = purchased Slow Traffic • P = prize shop</div>
+<div id="touch">
+<button class="tbtn" id="left">◀</button><button class="tbtn" id="boost">⚡</button><button class="tbtn" id="right">▶</button>
+</div>
+<script>
+const c=document.getElementById('c'),x=c.getContext('2d');
+let W,H,dpr;
+function resize(){dpr=devicePixelRatio||1;W=innerWidth;H=innerHeight;c.width=W*dpr;c.height=H*dpr;x.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',resize);resize();
+
+const keys={}; addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;if(e.key==='p'||e.key==='P')toggleShop()});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+
+let state='intro', introT=0, last=performance.now(), money=Number(localStorage.getItem('dashCashMoney')||0), passed=0;
+let player={lane:1, x:0, target:0, speed:0};
+let cars=[], spawnT=0, distance=0, shake=0, best=0;
+const prizes=[
+ ['🏎️ Turbo Paint',20],['🕶️ Neon Shades',30],['🎧 Headphones',45],['🏆 Golden Trophy',75],
+ ['⚡ BOOST — 1 use',200],['🐌 SLOW TRAFFIC — 30 sec',500]
+];
+let owned=new Set();
+let boostCharges=0, slowCharges=0, slowTimer=0;
+
+function toggleShop(){
+ if(state==='game'||state==='shop'){state=state==='shop'?'game':'shop';document.getElementById('shop').style.display=state==='shop'?'block':'none';}
+}
+function shop(){
+ let s='<b>$'+money+'</b>';
+ prizes.forEach((p,i)=>{s+=`<div class="item"><span>${p[0]} $${p[1]}</span><button onclick="buy(${i})">${owned.has(i)?'Owned':'Buy'}</button></div>`});
+ document.getElementById('cashShop').innerHTML=s;
+}
+function buy(i){
+ if(money<prizes[i][1])return;
+ if(i===4){money-=200;localStorage.setItem('dashCashMoney',money);boostCharges++;shop();return}
+ if(i===5){money-=500;localStorage.setItem('dashCashMoney',money);slowCharges++;shop();return}
+ if(!owned.has(i)){money-=prizes[i][1];localStorage.setItem('dashCashMoney',money);owned.add(i);shop()}
+}
+
+function reset(){
+ state='game';document.getElementById('shop').style.display='none';
+ passed=0;distance=0;player={lane:1,x:0,target:0,speed:0};
+ cars=[];spawnT=0;shake=0;
+}
+function road(){
+ let horizon=H*.32, bottom=H*1.08;
+ x.fillStyle='#111722';x.fillRect(0,0,W,H);
+ // sky
+ let g=x.createLinearGradient(0,0,0,horizon);g.addColorStop(0,'#182b47');g.addColorStop(1,'#8a9fb5');x.fillStyle=g;x.fillRect(0,0,W,horizon+5);
+ // city
+ for(let i=0;i<25;i++){
+   let bw=35+(i*17)%55,bh=35+(i*43)%115, bx=(i*91)%W;
+   x.fillStyle=i%2?'#172333':'#202c3d';x.fillRect(bx,horizon-bh,bw,bh);
+ }
+ // road
+ x.fillStyle='#292d34';x.beginPath();x.moveTo(W*.37,horizon);x.lineTo(W*.63,horizon);x.lineTo(W*.98,bottom);x.lineTo(W*.02,bottom);x.closePath();x.fill();
+ // shoulders
+ x.strokeStyle='#777';x.lineWidth=7;x.beginPath();x.moveTo(W*.37,horizon);x.lineTo(W*.02,bottom);x.moveTo(W*.63,horizon);x.lineTo(W*.98,bottom);x.stroke();
+ // lane lines moving toward camera
+ let offset=(distance*0.018)%1;
+ for(let lane=1;lane<3;lane++){
+   for(let z=0;z<1;z+=.12){
+    let p=(z+offset)%1, yy=horizon+(bottom-horizon)*p*p;
+    let center=W*.5+(lane-1)*W*.22*p;
+    let gap=8+35*p;
+    x.strokeStyle='#e9e9e9aa';x.lineWidth=2+4*p;
+    x.beginPath();x.moveTo(center-gap,yy);x.lineTo(center+gap,yy);x.stroke();
+   }
+ }
+}
+
+function perspectiveX(lane,z){
+ let center=W*.5+(lane-1)*W*.22*z;
+ return center;
+}
+function drawCar(car){
+ let z=car.z, px=perspectiveX(car.lane,z), yy=H*.32+(H*.72)*z*z;
+ let sc=.28+1.05*z, w=38*sc,h=72*sc;
+ x.save();x.translate(px,yy);x.rotate(car.tilt||0);
+ x.fillStyle=car.color;x.fillRect(-w/2,-h/2,w,h);
+ x.fillStyle='#101820';x.fillRect(-w*.34,-h*.18,w*.68,h*.28);
+ x.fillStyle='#dfe8ef';x.fillRect(-w*.31,-h*.13,w*.62,h*.12);
+ x.fillStyle='#111';x.fillRect(-w*.52,h*.25,w*.2,h*.16);x.fillRect(w*.32,h*.25,w*.2,h*.16);
+ x.restore();
+}
+function drawPlayer(){
+ let px=W*.5+player.x, py=H*.82;
+ x.save();x.translate(px,py);
+ x.shadowBlur=18;x.shadowColor='#00d9ff';
+ x.fillStyle='#16a9d8';x.beginPath();x.roundRect(-32,-54,64,108,13);x.fill();
+ x.shadowBlur=0;x.fillStyle='#0b1822';x.fillRect(-24,-27,48,30);
+ x.fillStyle='#d8eef7';x.fillRect(-20,-22,40,13);
+ x.fillStyle='#111';x.fillRect(-38,28,16,27);x.fillRect(22,28,16,27);
+ x.fillStyle='#ff4040';x.fillRect(-25,42,12,7);x.fillRect(13,42,12,7);
+ x.restore();
+}
+function spawn(){
+ let lane=Math.floor(Math.random()*3);
+ cars.push({lane,z:.03,color:['#e84b4b','#f1c40f','#8e7dff','#4fd18b'][Math.floor(Math.random()*4)],speed:.25+Math.random()*.12});
+}
+function hud(){
+ x.fillStyle='#fff';x.font='bold 20px Arial';
+ x.fillText('💵 $'+money,20,34);
+ x.fillText('🚗 Passed: '+passed,20,61);
+ x.fillText('⚡ Speed: '+Math.round(player.speed*100),20,88);
+ x.fillText('🏆 Best: '+best,20,115);
+ x.fillText('⚡ Boosts: '+boostCharges+'   🐌 Slow: '+slowCharges,20,142);
+ if(slowTimer>0){x.fillStyle='#8ee7ff';x.fillText('🐌 SLOW TRAFFIC '+Math.ceil(slowTimer)+'s',20,169);}
+}
+function intro(dt){
+ introT+=dt;
+ x.fillStyle='#05070b';x.fillRect(0,0,W,H);
+ x.textAlign='center';x.font='900 10vw Arial';
+ let t=Math.min(introT/1.2,1);
+ let ease=t*t*(3-2*t);
+ let dash=-W*.35+(W*.5)*ease, cash=W*1.35-(W*.5)*ease;
+ x.fillStyle='#fff';x.fillText('DASH',dash,H*.48);
+ x.fillStyle='#ffd43b';x.font='900 5vw Arial';x.fillText('FOR',W*.5,H*.48);
+ x.fillStyle='#fff';x.font='900 10vw Arial';x.fillText('CASH',cash,H*.48);
+ if(introT>1.25){
+   let e=Math.min((introT-1.25)/.55,1);
+   x.globalAlpha=1-e;x.font=(12+e*20)+'vw Arial';x.fillText('💥',W*.5,H*.52);
+ }
+ x.globalAlpha=1;x.font='bold 18px Arial';x.fillText('Dodge cars • pass cars • earn $2 • get faster',W*.5,H*.68);
+ x.textAlign='left';
+ if(introT>1.9)reset();
+}
+function crash(){
+ state='crash';best=Math.max(best,passed);shake=18;
+}
+function update(dt){
+ if(state==='intro'){intro(dt);return}
+ if(state==='crash'){
+  x.fillStyle='#0b0d12';x.fillRect(0,0,W,H);
+  x.textAlign='center';x.fillStyle='#ff5252';x.font='900 10vw Arial';x.fillText('CRASH!',W/2,H*.42);
+  x.fillStyle='#fff';x.font='bold 22px Arial';x.fillText('Cars passed: '+passed+'  •  Wallet: $'+money,W/2,H*.53);
+  x.fillText('Press ENTER to race again',W/2,H*.62);x.textAlign='left';
+  if(keys.enter)reset();return;
+ }
+ if(state==='shop'){road();hud();shop();return}
+ let left=keys.arrowleft||keys.a, right=keys.arrowright||keys.d;
+ let boost=keys[' '] && boostCharges>0;
+ if(boost && !keys._boostUsed){boostCharges--;keys._boostUsed=true;shop()}
+ if(!keys[' '])keys._boostUsed=false;
+ if(keys.s && slowCharges>0 && !keys._slowUsed){
+   slowCharges--;slowTimer=30;keys._slowUsed=true;shop();
+ }
+ if(!keys.s)keys._slowUsed=false;
+ if(slowTimer>0)slowTimer-=dt;
+ let steer=(right?1:0)-(left?1:0);
+ player.x += steer*dt*620;
+ player.x*=Math.pow(.0008,dt);
+ player.x=Math.max(-W*.29,Math.min(W*.29,player.x));
+ let targetSpeed=360+passed*11+(boost?420:0);
+ player.speed += (targetSpeed-player.speed)*(1-Math.pow(.0001,dt));
+ distance+=player.speed*dt;
+ spawnT-=dt;
+ let interval=Math.max(.30,.72-passed*.004);
+ if(spawnT<=0){spawn();spawnT=interval}
+ for(let i=cars.length-1;i>=0;i--){
+   let car=cars[i];
+   car.z += dt*(player.speed/520)*(.92-car.speed*.2)*(slowTimer>0?0.35:1);
+   car.tilt=(player.x-(car.lane-1)*W*.22*car.z)*.0004;
+   let carX=perspectiveX(car.lane,car.z);
+   if(car.z>.82 && Math.abs(carX-(W*.5+player.x))<42){
+      crash();return;
+   }
+   if(car.z>1.15){
+      cars.splice(i,1);passed++;money+=2;localStorage.setItem('dashCashMoney',money);
+   }
+ }
+ shake*=Math.pow(.01,dt);
+}
+function render(){
+ let sx=(Math.random()-.5)*shake,sy=(Math.random()-.5)*shake;
+ x.save();x.translate(sx,sy);
+ if(state!=='intro'&&state!=='crash'){road();cars.forEach(drawCar);drawPlayer();hud()}
+ x.restore();
+}
+function loop(now){
+ let dt=Math.min(.035,(now-last)/1000);last=now;
+ update(dt);render();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
